@@ -276,7 +276,10 @@ export default function Docs() {
   }, [body]);
   // A new doc starts at the top; the URL's #section is scrolled to once it renders and whenever the hash changes.
   const loaded = body !== undefined;
-  useEffect(() => scroller?.scrollTo(0, 0), [path, scroller]);
+  // A block body: scrollTo returns a Promise in recent browsers, and an effect must not return one.
+  useEffect(() => {
+    scroller?.scrollTo(0, 0);
+  }, [path, scroller]);
   useEffect(() => {
     const id = decodeURIComponent(location.hash.slice(1));
     if (id && loaded) document.getElementById(id)?.scrollIntoView();
