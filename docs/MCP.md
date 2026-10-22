@@ -29,6 +29,8 @@ Other clients:
 
 Every tool that works on a project takes an optional `project` key. Without one, it uses the project from the nearest `.bankan` file, searching from the working directory upwards. If neither exists, the tool returns an error that explains how to link the repo.
 
+A `.bankan` file may also name the repo's `component` (`bankan link HH --component apps`) when one project spans several repos. Then `create_ticket` sets that component unless told otherwise, and `context` says which component the repo is and lists its in-progress tickets first. Nothing is filtered implicitly: `list_tickets` shows every component unless you pass `component`.
+
 ## Tools
 
 Arguments are checked strictly. A misspelt argument such as `assigne` is an error that lists the valid names, rather than being silently ignored. Ticket `links` and `url` custom fields must be `http://`, `https://` or `mailto:` links.
@@ -37,21 +39,21 @@ All tools are annotated `destructiveHint: false`. Read tools are also `readOnlyH
 
 | Tool | Purpose | Returns |
 |---|---|---|
-| `context` | The linked project's statuses (with categories), types, labels, milestones, custom fields, counts, in-progress tickets and proposals awaiting review. Loads at session start (`anthropic/alwaysLoad`). | text summary |
+| `context` | The linked project's statuses (with categories), types, labels, milestones, custom fields, counts, in-progress tickets, proposals awaiting review, locked decisions (accepted proposals labelled `locked`, up to 30) and docs to read first (tagged `start-here`). Loads at session start (`anthropic/alwaysLoad`). | text summary |
 | `list_projects` | All projects with counts. | one line each |
 | `create_project` | `key`, `name`, `description?` | confirmation |
-| `list_tickets` | Filters: `status`, `category`, `type`, `priority`, `label`, `assignee`, `milestone`, `parent`, `query`, `include_closed`. Plus `detail: concise\|full` and `cursor`. Shows open tickets only by default, 25 per page. | `KEY \| status \| type \| priority \| @assignee \| #labels \| title` |
+| `list_tickets` | Filters: `status`, `category`, `type`, `priority`, `label`, `assignee`, `milestone`, `parent`, `component`, `query`, `include_closed`. Plus `detail: concise\|full` and `cursor`. Shows open tickets only by default, 25 per page. | `KEY \| status \| type \| priority \| @assignee \| #labels \| title` |
 | `get_ticket` | `id` | front matter + description + last 10 comments |
-| `create_ticket` | `title` plus any ticket field, and an optional `comment`. | `Created RES-13 in Todo: …` |
+| `create_ticket` | `title` plus any ticket field, and an optional `comment`. `component` defaults to the repo's (see below). | `Created RES-13 in Todo: …` |
 | `update_ticket` | `id` plus the fields to change. Pass `null` to clear a field. List fields are replaced. Takes an optional `comment`. | `Updated RES-12: status Todo → In Progress, assignee → claude` |
 | `add_comment` | `id`, `body`, `author?` | `Added comment #3 to RES-12.` |
 | `list_docs` | | `path \| title \| #tags \| updated` |
-| `get_doc` | `path`, `section?` (a heading, to read only that part) | front matter + Markdown |
+| `get_doc` | `path`, `section?` (a heading or section number such as `§15` or `3.1`, to read only that part) | front matter + Markdown |
 | `write_doc` | `path`, `title?`, `body?`, `tags?`. Creates or replaces the doc. | confirmation |
-| `list_proposals` | `status?` | `KEY \| status \| title \| tickets \| updated` |
-| `get_proposal` | `id`, `section?` | front matter + Markdown |
-| `create_proposal` | `title`, `body?` (defaults to the template), `status?`, `authors?`, `labels?`, `tickets?`, `supersedes?` | confirmation |
-| `update_proposal` | `id` plus the fields to change | change summary |
+| `list_proposals` | `status?` | `KEY (aliases) \| status \| title \| tickets \| updated` |
+| `get_proposal` | `id` (a key, or an alias such as `D17` resolved in `project`), `section?` | front matter + Markdown |
+| `create_proposal` | `title`, `body?` (defaults to the template), `status?`, `aliases?`, `authors?`, `labels?`, `tickets?`, `supersedes?` | confirmation |
+| `update_proposal` | `id` (key or alias) plus the fields to change | change summary |
 | `search` | `query`, `project?`, `cursor?` | `KEY \| kind \| status \| title — snippet` |
 
 The tools leave out deletes on purpose.

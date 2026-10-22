@@ -14,10 +14,11 @@ export interface Filters {
   label: string;
   assignee: string;
   milestone: string;
+  component: string;
   showClosed: boolean;
 }
 
-const EMPTY: Filters = { q: "", type: "", priority: "", label: "", assignee: "", milestone: "", showClosed: true };
+const EMPTY: Filters = { q: "", type: "", priority: "", label: "", assignee: "", milestone: "", component: "", showClosed: true };
 
 export interface ProjectCtx {
   project: ProjectSummary;
@@ -44,6 +45,7 @@ function applyFilters(tickets: Ticket[], f: Filters, project: ProjectSummary) {
       (!f.label || t.labels?.includes(f.label)) &&
       (!f.assignee || (f.assignee === "-" ? !t.assignee : t.assignee === f.assignee)) &&
       (!f.milestone || t.milestone === f.milestone) &&
+      (!f.component || (f.component === "-" ? !t.component : t.component === f.component)) &&
       (f.showClosed || !isClosed(categoryOf(project, t.status))),
   );
 }
@@ -53,7 +55,9 @@ export default function ProjectLayout() {
   const [params, setParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const [filters, setFilters] = useLocalState<Filters>(`bankan.filters.${key}`, EMPTY);
+  const [stored, setFilters] = useLocalState<Filters>(`bankan.filters.${key}`, EMPTY);
+  // Filters saved before a field existed lack it.
+  const filters = { ...EMPTY, ...stored };
   const project = useQuery({ queryKey: ["project", key], queryFn: () => api.project(key) });
   const tickets = useQuery({ queryKey: ["tickets", key], queryFn: () => api.tickets(key) });
 
@@ -87,6 +91,7 @@ export default function ProjectLayout() {
   const set = (patch: Partial<Filters>) => setFilters({ ...filters, ...patch });
   const active = JSON.stringify({ ...filters, showClosed: true }) !== JSON.stringify(EMPTY) || !filters.showClosed;
   const assignees = [...new Set(tickets.data.map((t) => t.assignee).filter(Boolean) as string[])].sort();
+  const components = [...new Set(tickets.data.map((t) => t.component).filter(Boolean) as string[])].sort();
   const ctx: ProjectCtx = {
     project: p,
     tickets: tickets.data,
@@ -159,6 +164,15 @@ export default function ProjectLayout() {
               <option value="">Milestone</option>
               {p.milestones.map((m) => (
                 <option key={m.name}>{m.name}</option>
+              ))}
+            </select>
+          )}
+          {components.length > 0 && (
+            <select className={`pill${filters.component ? " set" : ""}`} value={filters.component} onChange={(e) => set({ component: e.target.value })}>
+              <option value="">Component</option>
+              <option value="-">No component</option>
+              {components.map((c) => (
+                <option key={c}>{c}</option>
               ))}
             </select>
           )}

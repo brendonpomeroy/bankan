@@ -125,6 +125,8 @@ pub struct TicketInput {
     pub proposal: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub branch: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub component: Option<Option<String>>,
     pub links: Option<Vec<Link>>,
     /// Merged into the ticket's custom fields; a `null` value removes the field.
     pub fields: Option<BTreeMap<String, Value>>,
@@ -144,6 +146,7 @@ pub struct ProposalInput {
     pub title: Option<String>,
     pub status: Option<ProposalStatus>,
     pub body: Option<String>,
+    pub aliases: Option<Vec<String>>,
     pub authors: Option<Vec<String>>,
     pub labels: Option<Vec<String>>,
     pub tickets: Option<Vec<String>>,
@@ -163,6 +166,10 @@ pub struct DocInput {
     pub tags: Option<Vec<String>>,
     /// Move the doc to a new path.
     pub new_path: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub source: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub source_hash: Option<Option<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -176,6 +183,7 @@ pub struct TicketFilter {
     pub assignee: Option<String>,
     pub milestone: Option<String>,
     pub parent: Option<String>,
+    pub component: Option<String>,
     pub q: Option<String>,
     /// Include completed/canceled tickets (default true for the API, false for MCP).
     pub include_closed: Option<bool>,
@@ -261,6 +269,11 @@ pub fn valid_key(key: &str) -> bool {
         && key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
+/// A component names part of a multi-repo project, e.g. `apps` or `landing-site`.
+pub fn valid_component(c: &str) -> bool {
+    !c.is_empty() && c.len() <= 40 && c.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
 /// `RES-12` → (`RES`, 12)
 pub fn parse_ticket_id(id: &str) -> Option<(String, u32)> {
     let (key, n) = id.trim().rsplit_once('-')?;
@@ -316,9 +329,15 @@ pub fn slugify(title: &str) -> String {
     if out.is_empty() { "untitled".into() } else { out }
 }
 
+/// A stable 64-bit FNV-1a hash of a doc body as the store keeps it (trailing whitespace trimmed).
+pub fn content_hash(body: &str) -> String {
+    let h = body.trim_end().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{h:016x}")
+}
+
 // --- file format ------------------------------------------------------------
 
-fn split_front_matter(text: &str) -> (&str, &str) {
+pub fn split_front_matter(text: &str) -> (&str, &str) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     if let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) {
         for marker in ["\n---\n", "\n---\r\n"] {
@@ -733,6 +752,7 @@ impl Store {
                     && f.assignee.as_deref().is_none_or(|a| t.assignee.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(a)))
                     && f.milestone.as_deref().is_none_or(|m| t.milestone.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(m)))
                     && f.parent.as_deref().is_none_or(|m| t.parent.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(m)))
+                    && f.component.as_deref().is_none_or(|c| t.component.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(c)))
                     && q.as_ref().is_none_or(|q| {
                         t.id.to_lowercase() == *q || t.title.to_lowercase().contains(q) || t.description.to_lowercase().contains(q)
                     })
@@ -869,6 +889,12 @@ impl Store {
         if let Some(b) = input.branch {
             t.branch = clean(b);
         }
+        if let Some(c) = input.component {
+            t.component = clean(c);
+            if let Some(c) = t.component.as_deref().filter(|c| !valid_component(c)) {
+                return invalid(format!("component '{c}' must be up to 40 letters, digits, '-', '_' or '.'"));
+            }
+        }
         if let Some(links) = input.links {
             let mut out = Vec::new();
             for l in links {
@@ -946,6 +972,7 @@ impl Store {
             duplicate_of: None,
             proposal: None,
             branch: None,
+            component: None,
             links: vec![],
             fields: BTreeMap::new(),
             order: Self::bottom_order(data, &first_status),
@@ -1142,6 +1169,40 @@ impl Store {
         self.data(&key)?.proposals.get(&n).cloned().ok_or_else(|| Error::NotFound(format!("proposal {id} not found")))
     }
 
+    /// A proposal by key (`RES-P3`) or by one of its aliases (`D17`) within a project.
+    pub fn find_proposal(&self, key: &str, id: &str) -> Result<Proposal> {
+        if parse_proposal_id(id).is_some() {
+            return self.get_proposal(id);
+        }
+        let want = id.trim();
+        let found: Vec<&Proposal> = self.data(key)?.proposals.values().filter(|p| p.aliases.iter().any(|a| a.eq_ignore_ascii_case(want))).collect();
+        match found.as_slice() {
+            [p] => Ok((*p).clone()),
+            [] => Err(Error::NotFound(format!("no proposal {id} in {} (expected a key like {}-P3 or an alias)", key.to_ascii_uppercase(), key.to_ascii_uppercase()))),
+            many => invalid(format!("alias {id} is used by {}", many.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "))),
+        }
+    }
+
+    /// Aliases are short names (`D17`, `ADR4`) that are unique within the project and can't be mistaken for keys.
+    fn check_aliases(&self, p: &Proposal, aliases: Vec<String>) -> Result<Vec<String>> {
+        let aliases = dedupe(aliases);
+        let others = self.data(&project_of_id(&p.id))?.proposals.values().filter(|o| o.id != p.id);
+        for a in &aliases {
+            if a.len() > 32 || !a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                return invalid(format!("alias '{a}' must be up to 32 letters, digits, '-', '_' or '.'"));
+            }
+            if parse_proposal_id(a).is_some() || parse_ticket_id(a).is_some() {
+                return invalid(format!("alias '{a}' looks like a ticket or proposal key"));
+            }
+        }
+        for o in others {
+            if let Some(a) = aliases.iter().find(|a| o.aliases.iter().any(|x| x.eq_ignore_ascii_case(a))) {
+                return invalid(format!("alias '{a}' is already used by {}", o.id));
+            }
+        }
+        Ok(aliases)
+    }
+
     fn apply_proposal_input(&self, p: &mut Proposal, input: ProposalInput) -> Result<()> {
         if let Some(title) = input.title {
             if title.trim().is_empty() {
@@ -1151,6 +1212,9 @@ impl Store {
         }
         if let Some(body) = input.body {
             p.body = body.trim_end().into();
+        }
+        if let Some(a) = input.aliases {
+            p.aliases = self.check_aliases(p, a)?;
         }
         if let Some(a) = input.authors {
             p.authors = dedupe(a);
@@ -1200,6 +1264,7 @@ impl Store {
             id: format!("{key}-P{n}"),
             title: String::new(),
             status: ProposalStatus::Draft,
+            aliases: vec![],
             authors: vec![],
             labels: vec![],
             tickets: vec![],
@@ -1321,6 +1386,8 @@ impl Store {
             path: path.clone(),
             title: path.rsplit('/').next().unwrap_or(&path).replace('-', " "),
             tags: vec![],
+            source: None,
+            source_hash: None,
             created: t0,
             updated: t0,
             body: String::new(),
@@ -1336,6 +1403,12 @@ impl Store {
         }
         if let Some(tags) = input.tags {
             d.tags = dedupe(tags);
+        }
+        if let Some(s) = input.source {
+            d.source = clean(s);
+        }
+        if let Some(h) = input.source_hash {
+            d.source_hash = clean(h);
         }
         d.updated = t0;
         let mut old_file = None;
@@ -1403,8 +1476,8 @@ impl Store {
         };
         // (rank, hit): exact id match first, then title matches, then body matches.
         let mut hits: Vec<(u8, SearchHit)> = Vec::new();
-        let mut consider = |kind, project: &str, id: &str, title: &str, body: &str, status: Option<String>| {
-            let rank = if id.to_lowercase() == q {
+        let mut consider = |kind, project: &str, id: &str, aliases: &[String], title: &str, body: &str, status: Option<String>| {
+            let rank = if id.to_lowercase() == q || aliases.iter().any(|a| a.to_lowercase() == q) {
                 0
             } else if title.to_lowercase().contains(&q) {
                 1
@@ -1418,13 +1491,13 @@ impl Store {
         for d in projects {
             let key = &d.project.key;
             for t in d.tickets.values() {
-                consider("ticket", key, &t.id, &t.title, &t.description, Some(t.status.clone()));
+                consider("ticket", key, &t.id, &[], &t.title, &t.description, Some(t.status.clone()));
             }
             for p in d.proposals.values() {
-                consider("proposal", key, &p.id, &p.title, &p.body, Some(format!("{:?}", p.status).to_lowercase()));
+                consider("proposal", key, &p.id, &p.aliases, &p.title, &p.body, Some(format!("{:?}", p.status).to_lowercase()));
             }
             for doc in d.docs.values() {
-                consider("doc", key, &doc.path, &doc.title, &doc.body, None);
+                consider("doc", key, &doc.path, &[], &doc.title, &doc.body, None);
             }
         }
         hits.sort_by_key(|(r, _)| *r);
@@ -1499,6 +1572,38 @@ mod tests {
         assert_eq!(parse_ticket_id("RES-P3"), None);
         assert_eq!(parse_ticket_id("R-1"), None);
         assert_eq!(slugify("Getting Started!"), "getting-started");
+    }
+
+    #[test]
+    fn components() {
+        let (_dir, mut s) = store();
+        s.create_project(NewProject { key: "HH".into(), name: "HH".into(), ..Default::default() }).unwrap();
+        s.create_ticket("HH", TicketInput { component: Some(Some("apps".into())), ..ticket("a") }).unwrap();
+        s.create_ticket("HH", ticket("b")).unwrap();
+        let only = |c: &str| s.list_tickets("HH", &TicketFilter { component: Some(c.into()), ..Default::default() }).unwrap().len();
+        assert_eq!(only("APPS"), 1);
+        assert_eq!(only("cloud"), 0);
+        assert!(s.create_ticket("HH", TicketInput { component: Some(Some("a b".into())), ..ticket("c") }).is_err());
+        let t = s.update_ticket("HH-1", TicketInput { component: Some(None), ..Default::default() }).unwrap();
+        assert_eq!(t.component, None);
+    }
+
+    #[test]
+    fn proposal_aliases() {
+        let (_dir, mut s) = store();
+        s.create_project(NewProject { key: "HH".into(), name: "HH".into(), ..Default::default() }).unwrap();
+        let aliased = |a: &[&str]| ProposalInput { title: Some("x".into()), aliases: Some(a.iter().map(|v| v.to_string()).collect()), ..Default::default() };
+        let p = s.create_proposal("HH", aliased(&["D17", " d17 "])).unwrap();
+        assert_eq!(p.aliases, vec!["D17"]);
+        assert_eq!(s.find_proposal("HH", "d17").unwrap().id, "HH-P1");
+        assert_eq!(s.find_proposal("HH", "HH-P1").unwrap().id, "HH-P1");
+        assert!(matches!(s.find_proposal("HH", "D18"), Err(Error::NotFound(_))));
+        assert!(s.create_proposal("HH", aliased(&["D17"])).unwrap_err().to_string().contains("already used by HH-P1"));
+        assert!(s.create_proposal("HH", aliased(&["HH-P9"])).is_err());
+        assert!(s.create_proposal("HH", aliased(&["has space"])).is_err());
+        // Keeping its own alias on update is fine.
+        s.update_proposal("HH-P1", aliased(&["D17", "ADR17"])).unwrap();
+        assert_eq!(s.search("adr17", None, 5).unwrap()[0].id, "HH-P1");
     }
 
     #[test]

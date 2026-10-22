@@ -11,12 +11,15 @@
 
 use crate::config::Config;
 use crate::link::{self, Link};
+use crate::store;
 use serde_json::{json, Map, Value};
 use std::io::{BufRead, Write};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const PAGE: usize = 25;
 const RECENT_COMMENTS: usize = 10;
+/// Locked decisions listed in full by `context`.
+const LOCKED: usize = 30;
 /// Lets long docs come back inline instead of being spilled to a file by Claude Code.
 const MAX_RESULT_CHARS: u64 = 200_000;
 
@@ -24,11 +27,12 @@ const MAX_RESULT_CHARS: u64 = 200_000;
 const INSTRUCTIONS: &str = "BanKan: the user's local tracker for tickets (Kanban board), docs and proposals (RFC/ADR). Use it instead of writing TODOs, plans or bug lists into repo files.\n\
 \n\
 - Start with `context`: it shows the project linked to this repo (via its .bankan file), the valid statuses, types, labels and milestones, and what's in progress.\n\
-- Ticket keys look like RES-12; proposals like RES-P3. Use keys in commit messages and branch names.\n\
+- Ticket keys look like RES-12; proposals like RES-P3 (get_proposal also takes an alias such as D17). Use keys in commit messages and branch names.\n\
 - Statuses are custom per project but each has a fixed category: backlog, unstarted, started, completed, canceled.\n\
 - Working a ticket: update_ticket status → a started status (e.g. In Progress) with assignee set to you; add a `comment` for notable progress or decisions; when finished move it to In Review (if the user should check) or Done.\n\
 - File bugs and follow-ups you discover as new tickets instead of fixing everything at once.\n\
 - Designs that need the user's sign-off go in proposals (draft → review); only the user accepts or rejects. Lasting reference material goes in docs.\n\
+- `context` lists docs tagged start-here (read them before designing anything) and locked decisions (accepted proposals labelled locked): don't work against one; propose a change instead.\n\
 - Tools default to the linked project; pass `project` to work on another one.";
 
 struct Api {
@@ -85,6 +89,11 @@ fn list_of(v: &Value, k: &str) -> Vec<String> {
     v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
+/// Cuts `s` to `max` characters, ending with `…` when cut.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
+}
+
 /// `2026-10-20T14:03:11Z` → `2026-10-20`
 fn date(v: &Value, k: &str) -> Option<String> {
     str_of(v, k).map(|s| s.chars().take(10).collect())
@@ -109,7 +118,7 @@ fn ticket_line(t: &Value, full: bool) -> String {
     let mut line = bits.join(" | ");
     if full {
         let mut extra = Vec::new();
-        for k in ["milestone", "parent", "duplicate_of", "proposal", "branch"] {
+        for k in ["component", "milestone", "parent", "duplicate_of", "proposal", "branch"] {
             if let Some(v) = str_of(t, k) {
                 extra.push(format!("{k}={v}"));
             }
@@ -176,7 +185,7 @@ fn render_ticket(t: &Value) -> String {
         t,
         &[
             "id", "title", "status", "type", "priority", "labels", "assignee", "estimate", "due", "milestone", "parent", "children", "blocks", "blocked_by",
-            "related", "duplicate_of", "proposal", "branch", "links", "fields",
+            "related", "duplicate_of", "proposal", "branch", "component", "links", "fields",
         ],
         &["created", "updated", "closed"],
     );
@@ -202,15 +211,31 @@ fn render_ticket(t: &Value) -> String {
 }
 
 /// Returns only the Markdown section whose heading contains `name` (case-insensitive),
-/// up to the next heading of the same or higher level.
+/// up to the next heading of the same or higher level. A section number such as
+/// `15`, `§15` or `3.1` picks the heading numbered that way before any substring match.
 fn extract_section(body: &str, name: &str) -> Option<String> {
-    let want = name.trim().trim_start_matches('#').trim().to_lowercase();
+    let want = name.trim().trim_start_matches(['#', '§']).trim().to_lowercase();
     let lines: Vec<&str> = body.lines().collect();
     let levels = heading_levels(&lines);
-    let start = (0..lines.len()).find(|&i| levels[i].is_some() && lines[i].trim_start_matches('#').trim().to_lowercase().contains(&want))?;
+    let text = |i: usize| lines[i].trim_start_matches('#').trim().to_lowercase();
+    let is_number = !want.is_empty() && want.trim_end_matches('.').split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    let numbered = |i: usize| is_number && heading_number(&text(i)) == Some(want.trim_end_matches('.'));
+    let start = (0..lines.len())
+        .find(|&i| levels[i].is_some() && numbered(i))
+        .or_else(|| (0..lines.len()).find(|&i| levels[i].is_some() && text(i).contains(&want)))?;
     let lvl = levels[start].unwrap();
     let end = (start + 1..lines.len()).find(|&i| levels[i].is_some_and(|n| n <= lvl)).unwrap_or(lines.len());
     Some(lines[start..end].join("\n"))
+}
+
+/// `15. Decision log` → `15`, `§3.1 Domains` → `3.1`; `None` when the heading isn't numbered.
+fn heading_number(heading: &str) -> Option<&str> {
+    let h = heading.trim_start_matches('§').trim_start();
+    let end = h.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(h.len());
+    let num = h[..end].trim_end_matches('.');
+    let rest = &h[end..];
+    let ok = !num.is_empty() && num.split('.').all(|p| !p.is_empty()) && (rest.is_empty() || rest.starts_with([' ', ')', ':']));
+    ok.then_some(num)
 }
 
 /// The ATX heading level of each line, skipping fenced code blocks (where `#` is often a shell comment).
@@ -263,9 +288,9 @@ fn describe_changes(before: &Value, after: &Value, keys: &[&str]) -> String {
 
 const TICKET_KEYS: &[&str] = &[
     "title", "status", "type", "priority", "labels", "assignee", "estimate", "due", "milestone", "parent", "blocks", "related", "duplicate_of", "proposal",
-    "branch", "links", "fields", "description",
+    "branch", "component", "links", "fields", "description",
 ];
-const PROPOSAL_KEYS: &[&str] = &["title", "status", "authors", "labels", "tickets", "supersedes", "superseded_by", "decided", "body"];
+const PROPOSAL_KEYS: &[&str] = &["title", "status", "aliases", "authors", "labels", "tickets", "supersedes", "superseded_by", "decided", "body"];
 
 fn page_footer(shown: usize, offset: usize, total: usize, narrow: &str) -> String {
     if total == 0 {
@@ -313,6 +338,13 @@ fn ticket_props(create: bool) -> Map<String, Value> {
     p.insert("proposal".into(), nullable("Proposal this ticket implements, e.g. \"RES-P3\" (also adds the ticket to the proposal).", "string"));
     p.insert("branch".into(), nullable("Git branch for the work, e.g. \"res-12-login-plus\".", "string"));
     p.insert(
+        "component".into(),
+        nullable(
+            if create { "Part of a multi-repo project, e.g. \"apps\". Defaults to this repo's component from `context`." } else { "Part of a multi-repo project, e.g. \"apps\". null clears." },
+            "string",
+        ),
+    );
+    p.insert(
         "links".into(),
         json!({ "type": "array", "description": "Replaces external links, e.g. [{\"url\": \"https://github.com/o/r/pull/4\", \"title\": \"PR #4\"}].", "items": { "type": "object", "properties": { "url": { "type": "string" }, "title": { "type": "string" } }, "required": ["url"] } }),
     );
@@ -339,7 +371,7 @@ fn tools() -> Value {
         tool(
             "context",
             "Project context",
-            "BanKan project context for this repo: linked project, valid statuses (with categories), types, labels, milestones, custom fields, counts, and the tickets in progress. Call first in a session, before creating or updating tickets.",
+            "BanKan project context for this repo: linked project, valid statuses (with categories), types, labels, milestones, custom fields, counts, the tickets in progress, locked decisions (accepted proposals labelled `locked`) and docs to read first (tagged `start-here`). Call first in a session, before creating or updating tickets.",
             json!({ "project": project }),
             &[],
             &read,
@@ -367,6 +399,7 @@ fn tools() -> Value {
                 "assignee": s("Assignee, e.g. claude."),
                 "milestone": s("Milestone name."),
                 "parent": s("Only sub-tickets of this key."),
+                "component": s("Only tickets for this part of a multi-repo project, e.g. apps."),
                 "query": s("Text in key, title or description."),
                 "include_closed": { "type": "boolean" },
                 "detail": detail,
@@ -412,7 +445,7 @@ fn tools() -> Value {
             "get_doc",
             "Read doc",
             "Read a doc as front matter + Markdown. Pass `section` (a heading) to read just that part of a long doc.",
-            json!({ "project": project, "path": s("Doc path, e.g. guides/setup"), "section": s("Optional heading text, e.g. \"Storage\"") }),
+            json!({ "project": project, "path": s("Doc path, e.g. guides/setup"), "section": s("Optional heading text or section number, e.g. \"Storage\" or \"§15\"") }),
             &["path"],
             &read,
         ),
@@ -427,7 +460,7 @@ fn tools() -> Value {
         tool(
             "list_proposals",
             "List proposals",
-            "List a project's proposals (RFC/ADR design docs): KEY | status | title | tickets | updated.",
+            "List a project's proposals (RFC/ADR design docs): KEY (aliases) | status | title | tickets | updated.",
             json!({ "project": project, "status": proposal_status }),
             &[],
             &read,
@@ -436,7 +469,7 @@ fn tools() -> Value {
             "get_proposal",
             "Read proposal",
             "Read a proposal as front matter + Markdown. Pass `section` (a heading) to read just that part.",
-            json!({ "id": s("Proposal key, e.g. RES-P3"), "section": s("Optional heading text, e.g. \"Alternatives\"") }),
+            json!({ "id": s("Proposal key, e.g. RES-P3, or an alias such as D17"), "project": project, "section": s("Optional heading text or section number, e.g. \"Alternatives\" or \"3.1\"") }),
             &["id"],
             &read,
         ),
@@ -444,7 +477,7 @@ fn tools() -> Value {
             "create_proposal",
             "Create proposal",
             "Write a design proposal (RFC/ADR) for the user to review. Starts as draft from a template (Summary, Motivation, Proposal, Alternatives considered, Risks & drawbacks, Open questions, Decision) unless you pass `body`. Set status \"review\" when ready.",
-            json!({ "project": project, "title": s("Title, e.g. \"Move auth to OAuth device flow\""), "body": s("Markdown body"), "status": proposal_status, "authors": arr("Authors"), "labels": arr("Labels"), "tickets": arr("Related ticket keys"), "supersedes": s("Key of a proposal this replaces") }),
+            json!({ "project": project, "title": s("Title, e.g. \"Move auth to OAuth device flow\""), "body": s("Markdown body"), "status": proposal_status, "aliases": arr("Other names it goes by, unique in the project, e.g. [\"D17\"] for decision 17"), "authors": arr("Authors"), "labels": arr("Labels"), "tickets": arr("Related ticket keys"), "supersedes": s("Key of a proposal this replaces") }),
             &["title"],
             &write,
         ),
@@ -452,7 +485,7 @@ fn tools() -> Value {
             "update_proposal",
             "Update proposal",
             "Change a proposal; only passed fields change. Only the user accepts or rejects proposals unless they ask you to. Link implementing tickets with `tickets` (or set `proposal` on the ticket).",
-            json!({ "id": s("Proposal key, e.g. RES-P3"), "title": s("Title"), "status": proposal_status, "body": s("Markdown body (replaces it)"), "authors": arr("Authors"), "labels": arr("Labels"), "tickets": arr("Ticket keys implementing it"), "supersedes": s("Proposal key"), "superseded_by": s("Proposal key") }),
+            json!({ "id": s("Proposal key, e.g. RES-P3, or an alias such as D17"), "project": project, "title": s("Title"), "status": proposal_status, "body": s("Markdown body (replaces it)"), "aliases": arr("Replaces the aliases, e.g. [\"D17\"]"), "authors": arr("Authors"), "labels": arr("Labels"), "tickets": arr("Ticket keys implementing it"), "supersedes": s("Proposal key"), "superseded_by": s("Proposal key") }),
             &["id"],
             &write,
         ),
@@ -516,6 +549,21 @@ impl Server {
         self.link.as_ref().map(|l| l.project.clone()).ok_or_else(|| {
             "This repo isn't linked to a BanKan project. Pass `project` (see list_projects), or ask the user to run `bankan link <KEY>` in the repo.".to_string()
         })
+    }
+
+    /// This repo's component (from `.bankan`) when it's linked to `project`.
+    fn component_for(&self, project: &str) -> Option<&str> {
+        self.link.as_ref().filter(|l| l.project == project).and_then(|l| l.component.as_deref())
+    }
+
+    /// API path of a proposal given its key (`RES-P3`) or an alias (`D17`, resolved in the project).
+    fn proposal_path(&self, args: &Map<String, Value>) -> Result<String, String> {
+        let id = args.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("`id` is required")?;
+        if store::parse_proposal_id(id).is_some() {
+            return Ok(format!("/proposals/{}", encode_path(&id.to_ascii_uppercase())));
+        }
+        let p = self.api.get(&format!("/projects/{}/proposals/{}", encode_path(&self.project(args)?), encode_path(id)))?;
+        Ok(format!("/proposals/{}", encode_path(str_of(&p, "id").unwrap_or(id))))
     }
 
     /// Request body: every argument except the routing/presentation ones.
@@ -591,9 +639,17 @@ impl Server {
             c["backlog"], c["unstarted"], c["started"], c["completed"], c["canceled"], c["docs"], c["proposals"]
         ));
         out.push_str(&format!("You are \"{}\" (use as assignee and comment author).\n", self.agent));
+        let component = self.component_for(&key);
+        if let Some(c) = component {
+            out.push_str(&format!("This repo is component \"{c}\": new tickets get it by default; filter with list_tickets component={c}.\n"));
+        }
 
         let started = self.api.call("GET", &format!("/projects/{}/tickets", encode_path(&key)), &[("category", "started".into())], None)?;
-        let started = started.as_array().cloned().unwrap_or_default();
+        let mut started = started.as_array().cloned().unwrap_or_default();
+        // This repo's tickets first; the sort is stable, so board order holds within each group.
+        if let Some(c) = component {
+            started.sort_by_key(|t| !str_of(t, "component").is_some_and(|x| x.eq_ignore_ascii_case(c)));
+        }
         out.push_str("\nIn progress:\n");
         if started.is_empty() {
             out.push_str("(nothing)\n");
@@ -615,6 +671,39 @@ impl Server {
             .collect();
         if !review.is_empty() {
             out.push_str(&format!("\nProposals awaiting review:\n{}\n", review.join("\n")));
+        }
+        let locked: Vec<String> = proposals
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| matches!(p["status"].as_str(), Some("accepted" | "implemented")) && list_of(p, "labels").iter().any(|l| l.eq_ignore_ascii_case("locked")))
+            .map(|p| {
+                let aliases = list_of(p, "aliases");
+                let id = str_of(p, "id").unwrap_or("?");
+                let id = if aliases.is_empty() { id.to_string() } else { format!("{id} ({})", aliases.join(", ")) };
+                format!("{id} | {}", clip(str_of(p, "title").unwrap_or(""), 100))
+            })
+            .collect();
+        if !locked.is_empty() {
+            out.push_str("\nLocked decisions (don't work against these; changing one needs a new proposal):\n");
+            for l in locked.iter().take(LOCKED) {
+                out.push_str(l);
+                out.push('\n');
+            }
+            if locked.len() > LOCKED {
+                out.push_str(&format!("…and {} more (list_proposals status=accepted)\n", locked.len() - LOCKED));
+            }
+        }
+        let docs = self.api.get(&format!("/projects/{}/docs", encode_path(&key)))?;
+        let start: Vec<String> = docs
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|d| list_of(d, "tags").iter().any(|t| t.eq_ignore_ascii_case("start-here")))
+            .map(|d| format!("{} | {}", str_of(d, "path").unwrap_or("?"), str_of(d, "title").unwrap_or("")))
+            .collect();
+        if !start.is_empty() {
+            out.push_str(&format!("\nRead first (get_doc):\n{}\n", start.join("\n")));
         }
         Ok(out)
     }
@@ -676,6 +765,7 @@ impl Server {
                     ("assignee", "assignee"),
                     ("milestone", "milestone"),
                     ("parent", "parent"),
+                    ("component", "component"),
                     ("query", "q"),
                 ] {
                     if let Some(v) = args.get(arg).and_then(Value::as_str).filter(|v| !v.is_empty()) {
@@ -699,7 +789,11 @@ impl Server {
             "get_ticket" => Ok(render_ticket(&api.get(&format!("/tickets/{}", id_path("id")?))?)),
             "create_ticket" => {
                 let project = self.project(args)?;
-                let t = api.call("POST", &format!("/projects/{}/tickets", encode_path(&project)), &[], Some(Self::body(args, &["project", "comment"])))?;
+                let mut body = Self::body(args, &["project", "comment"]);
+                if let Some(c) = self.component_for(&project).filter(|_| !args.contains_key("component")) {
+                    body["component"] = json!(c);
+                }
+                let t = api.call("POST", &format!("/projects/{}/tickets", encode_path(&project)), &[], Some(body))?;
                 let id = str_of(&t, "id").unwrap_or("?").to_string();
                 let mut out = format!("Created {id} in {}: {}", str_of(&t, "status").unwrap_or("?"), str_of(&t, "title").unwrap_or(""));
                 if let Some(c) = args.get("comment").and_then(Value::as_str).filter(|c| !c.trim().is_empty()) {
@@ -773,7 +867,10 @@ impl Server {
                     .filter(|p| status.is_none_or(|s| p["status"] == s))
                     .map(|p| {
                         let tickets = list_of(p, "tickets");
-                        let mut bits = vec![str_of(p, "id").unwrap_or("?").to_string(), str_of(p, "status").unwrap_or("?").to_string(), str_of(p, "title").unwrap_or("").to_string()];
+                        let aliases = list_of(p, "aliases");
+                        let id = str_of(p, "id").unwrap_or("?");
+                        let id = if aliases.is_empty() { id.to_string() } else { format!("{id} ({})", aliases.join(", ")) };
+                        let mut bits = vec![id, str_of(p, "status").unwrap_or("?").to_string(), str_of(p, "title").unwrap_or("").to_string()];
                         if !tickets.is_empty() {
                             bits.push(format!("tickets: {}", tickets.join(",")));
                         }
@@ -784,13 +881,13 @@ impl Server {
                 Ok(if lines.is_empty() { "No proposals.".into() } else { lines.join("\n") })
             }
             "get_proposal" => {
-                let p = api.get(&format!("/proposals/{}", id_path("id")?))?;
+                let p = api.get(&self.proposal_path(args)?)?;
                 let body = str_of(&p, "body").unwrap_or("");
                 let body = match args.get("section").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
                     Some(sec) => extract_section(body, sec).ok_or_else(|| format!("No heading matching \"{sec}\". Headings: {}", headings(body).join(" · ")))?,
                     None => body.to_string(),
                 };
-                Ok(front_matter(meta_of(&p, &["id", "title", "status", "authors", "labels", "tickets", "supersedes", "superseded_by", "decided"], &["created", "updated"]), &body))
+                Ok(front_matter(meta_of(&p, &["id", "title", "status", "aliases", "authors", "labels", "tickets", "supersedes", "superseded_by", "decided"], &["created", "updated"]), &body))
             }
             "create_proposal" => {
                 let project = self.project(args)?;
@@ -802,9 +899,9 @@ impl Server {
                 Ok(format!("Created {} ({}): {}", str_of(&p, "id").unwrap_or("?"), str_of(&p, "status").unwrap_or("?"), str_of(&p, "title").unwrap_or("")))
             }
             "update_proposal" => {
-                let path = format!("/proposals/{}", id_path("id")?);
+                let path = self.proposal_path(args)?;
                 let before = api.get(&path)?;
-                let after = api.call("PATCH", &path, &[], Some(Self::body(args, &["id"])))?;
+                let after = api.call("PATCH", &path, &[], Some(Self::body(args, &["id", "project"])))?;
                 Ok(format!("Updated {}: {}", str_of(&after, "id").unwrap_or("?"), describe_changes(&before, &after, PROPOSAL_KEYS)))
             }
             "search" => {
@@ -967,6 +1064,20 @@ mod tests {
         let fenced = "## Setup\n```sh\n# install deps\nnpm i\n```\nthen run\n## Next\nx";
         assert_eq!(extract_section(fenced, "setup").unwrap(), "## Setup\n```sh\n# install deps\nnpm i\n```\nthen run");
         assert!(extract_section(fenced, "install").is_none());
+    }
+
+    #[test]
+    fn numbered_sections() {
+        let body = "# Arch\n## 1. Goals\na\n## 11. Environments\nb\n## 15. Decision log\nc\n### 15.1 Old\nd\n## 3. Deployment\n### 3.1 Domains\ne\n## 16. Spikes\nf";
+        assert_eq!(extract_section(body, "§15").unwrap(), "## 15. Decision log\nc\n### 15.1 Old\nd");
+        assert_eq!(extract_section(body, "15").unwrap(), "## 15. Decision log\nc\n### 15.1 Old\nd");
+        assert_eq!(extract_section(body, "1").unwrap(), "## 1. Goals\na");
+        assert_eq!(extract_section(body, "§ 3.1").unwrap(), "### 3.1 Domains\ne");
+        assert_eq!(extract_section(body, "15.1").unwrap(), "### 15.1 Old\nd");
+        assert_eq!(extract_section(body, "decision").unwrap(), "## 15. Decision log\nc\n### 15.1 Old\nd");
+        assert_eq!(heading_number("15. decision log"), Some("15"));
+        assert_eq!(heading_number("2026 roadmap"), Some("2026"));
+        assert_eq!(heading_number("v2 plans"), None);
     }
 
     #[test]

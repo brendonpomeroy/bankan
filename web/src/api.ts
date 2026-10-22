@@ -50,6 +50,7 @@ export interface Ticket {
   duplicate_of?: string;
   proposal?: string;
   branch?: string;
+  component?: string;
   links?: Link[];
   fields?: Record<string, unknown>;
   order: number;
@@ -67,6 +68,7 @@ export interface Proposal {
   id: string;
   title: string;
   status: ProposalStatus;
+  aliases?: string[];
   authors?: string[];
   labels?: string[];
   tickets?: string[];
@@ -145,6 +147,8 @@ export const api = {
 
   proposals: (key: string) => req<Proposal[]>("GET", `/projects/${key}/proposals`),
   proposal: (id: string) => req<Proposal>("GET", `/proposals/${id}`),
+  /** By key or alias (`D17`) within a project. */
+  findProposal: (key: string, id: string) => req<Proposal>("GET", `/projects/${key}/proposals/${encodeURIComponent(id)}`),
   createProposal: (key: string, p: { title: string; authors?: string[] }) => req<Proposal>("POST", `/projects/${key}/proposals`, p),
   updateProposal: (id: string, p: Record<string, unknown>) => req<Proposal>("PATCH", `/proposals/${id}`, p),
   deleteProposal: (id: string) => req<unknown>("DELETE", `/proposals/${id}`),

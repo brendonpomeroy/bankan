@@ -229,7 +229,7 @@ pub fn setup(home: &Path) -> Result<()> {
             _ => None,
         };
         if let (Some(key), Some(root)) = (key, &repo) {
-            let file = link::write(root, &key)?;
+            let file = link::write(root, &key, None)?;
             log::success(format!("Linked {} → {}", style(tilde(&file)).dim(), style(&key).bold()))?;
             let keep_local = select("Should the .bankan link file be committed?")
                 .item(false, "Commit it", "teammates and other machines get the link too")
@@ -330,10 +330,16 @@ pub fn status(home: &Path, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn link_repo(cfg: &Config, project: &str, create: Option<String>) -> Result<()> {
+pub fn link_repo(cfg: &Config, project: &str, create: Option<String>, component: Option<String>) -> Result<()> {
     let key = project.trim().to_ascii_uppercase();
     if !store::valid_key(&key) {
         bail!("'{project}' is not a valid project key (2–10 uppercase letters/digits, e.g. RES)");
+    }
+    let component = component.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    if let Some(c) = &component {
+        if !store::valid_component(c) {
+            bail!("'{c}' is not a valid component (up to 40 letters, digits, '-', '_' or '.')");
+        }
     }
     if daemon_up(cfg).is_none() {
         eprintln!("  {} BanKan isn't running, so {key} couldn't be checked.", style("!").yellow());
@@ -348,10 +354,162 @@ pub fn link_repo(cfg: &Config, project: &str, create: Option<String>) -> Result<
     }
     let cwd = std::env::current_dir()?;
     let root = repo_root(&cwd).unwrap_or(cwd);
-    let file = link::write(&root, &key)?;
-    println!("  {} Linked {} → {}", style("✓").green(), style(tilde(&file)).dim(), style(&key).bold());
+    let file = link::write(&root, &key, component.as_deref())?;
+    let to = match &component {
+        Some(c) => format!("{} ({c})", style(&key).bold()),
+        None => style(&key).bold().to_string(),
+    };
+    println!("  {} Linked {} → {to}", style("✓").green(), style(tilde(&file)).dim());
     println!("    {}", style("Commit it, or keep it local with: echo .bankan >> ~/.config/git/ignore").dim());
     Ok(())
+}
+
+/// One Markdown file to import: where it goes and what it holds.
+struct ImportFile {
+    source: PathBuf,
+    path: String,
+    title: String,
+    tags: Option<Vec<String>>,
+    body: String,
+}
+
+/// `Research Notes/AI native.md` → `research-notes/ai-native`, under `prefix` if given.
+fn import_path(rel: &Path, prefix: Option<&str>) -> String {
+    let mut parts: Vec<String> = prefix.into_iter().flat_map(|p| p.split('/')).filter(|p| !p.trim().is_empty()).map(store::slugify).collect();
+    let rel = rel.with_extension("");
+    parts.extend(rel.iter().map(|seg| store::slugify(&seg.to_string_lossy())));
+    parts.join("/")
+}
+
+/// Title from front matter, else the first `# ` heading, else the file name.
+fn read_import(source: &Path, path: String) -> Result<ImportFile> {
+    let text = std::fs::read_to_string(source)?;
+    let (fm, body) = store::split_front_matter(&text);
+    let meta: Value = if fm.trim().is_empty() { Value::Null } else { serde_yaml::from_str(fm).unwrap_or(Value::Null) };
+    let heading = body.lines().find_map(|l| l.strip_prefix("# ")).map(|h| h.trim().to_string());
+    let stem = source.file_stem().map(|s| s.to_string_lossy().replace(['-', '_'], " ")).unwrap_or_default();
+    let title = meta["title"].as_str().map(str::to_string).or(heading).filter(|t| !t.trim().is_empty()).unwrap_or(stem);
+    let tags = meta["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect());
+    Ok(ImportFile { source: source.to_path_buf(), path, title, tags, body: body.trim_start_matches(['\n', '\r']).trim_end().to_string() })
+}
+
+fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    entries.sort();
+    for p in entries {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        if p.is_dir() {
+            collect_md(&p, out)?;
+        } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+/// `bankan import <dir>`: copies Markdown files into a project's docs through the daemon. Each doc
+/// records its source file and a hash of what was imported, so a re-run updates docs whose source
+/// changed and leaves alone (unless `force`) docs that were edited in BanKan since.
+pub fn import_docs(cfg: &Config, dir: &Path, project: Option<String>, prefix: Option<String>, dry_run: bool, force: bool) -> Result<()> {
+    let key = match project {
+        Some(p) => p.trim().to_ascii_uppercase(),
+        None => match link::find(&std::env::current_dir()?)? {
+            Some(l) => l.project,
+            None => bail!("this repo isn't linked to a project; pass --project KEY"),
+        },
+    };
+    if daemon_up(cfg).is_none() {
+        bail!("BanKan isn't running. Start it with `bankan serve`, or `bankan setup` to install it.");
+    }
+    let dir = dir.canonicalize().map_err(|e| anyhow::anyhow!("{}: {e}", dir.display()))?;
+    if !dir.is_dir() {
+        bail!("{} is not a folder", dir.display());
+    }
+    let mut sources = Vec::new();
+    collect_md(&dir, &mut sources)?;
+    if sources.is_empty() {
+        bail!("no .md files in {}", dir.display());
+    }
+    let existing: Vec<Value> = api(cfg, "GET", &format!("/projects/{key}/docs"), None)?.as_array().cloned().unwrap_or_default();
+    let by_path = |p: &str| existing.iter().find(|d| d["path"].as_str().is_some_and(|x| x.eq_ignore_ascii_case(p)));
+
+    let mut files = Vec::new();
+    for src in &sources {
+        let rel = src.strip_prefix(&dir).unwrap_or(src);
+        files.push(read_import(src, import_path(rel, prefix.as_deref()))?);
+    }
+    let mut seen = std::collections::HashMap::new();
+    for f in &files {
+        if let Some(other) = seen.insert(f.path.to_lowercase(), &f.source) {
+            bail!("{} and {} would both import as {}; rename one", tilde(other), tilde(&f.source), f.path);
+        }
+    }
+
+    println!("  Importing {} into {}{}", style(tilde(&dir)).dim(), style(&key).bold(), if dry_run { style(" (dry run)").yellow().to_string() } else { String::new() });
+    let (mut created, mut updated, mut unchanged, mut skipped) = (0, 0, 0, 0);
+    for f in &files {
+        let hash = store::content_hash(&f.body);
+        let url = format!("/projects/{key}/docs/{}", f.path.split('/').map(encode_segment).collect::<Vec<_>>().join("/"));
+        let (verb, why) = match by_path(&f.path) {
+            None => ("create", None),
+            Some(d) => match d["source_hash"].as_str() {
+                // Source unchanged: nothing to do, and edits made in BanKan stay (unless forced back).
+                Some(h) if h == hash && !force => ("same", None),
+                Some(h) => {
+                    let current = api(cfg, "GET", &url, None)?;
+                    let edited = store::content_hash(current["body"].as_str().unwrap_or("")) != h;
+                    match (h != hash, edited) {
+                        (false, false) => ("same", None),
+                        (_, true) if !force => ("skip", Some("edited in BanKan since the last import; --force replaces it")),
+                        _ => ("update", None),
+                    }
+                }
+                None if force => ("update", None),
+                None => ("skip", Some("a doc that wasn't imported is already at this path; --force replaces it")),
+            },
+        };
+        let mark = match verb {
+            "create" => style("+").green(),
+            "update" => style("~").cyan(),
+            "same" => style("=").dim(),
+            _ => style("!").yellow(),
+        };
+        if verb != "same" {
+            println!("  {mark} {}{}", f.path, why.map(|w| style(format!("  ({w})")).dim().to_string()).unwrap_or_default());
+        }
+        match verb {
+            "create" => created += 1,
+            "update" => updated += 1,
+            "same" => unchanged += 1,
+            _ => skipped += 1,
+        }
+        if dry_run || !matches!(verb, "create" | "update") {
+            continue;
+        }
+        let mut body = json!({ "title": f.title, "body": f.body, "source": f.source.display().to_string(), "source_hash": hash });
+        if let Some(tags) = &f.tags {
+            body["tags"] = json!(tags);
+        }
+        api(cfg, "PUT", &url, Some(body))?;
+    }
+    println!(
+        "  {} {created} created, {updated} updated, {unchanged} unchanged, {skipped} skipped{}",
+        style("✓").green(),
+        if dry_run { " (nothing written)" } else { "" }
+    );
+    Ok(())
+}
+
+fn encode_segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 pub fn welcome(home: &Path, cfg: &Config) -> Result<()> {

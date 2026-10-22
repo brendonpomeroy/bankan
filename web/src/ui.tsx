@@ -1,16 +1,78 @@
-import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { createElement, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown, { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Category, Priority, PRIORITIES } from "./api";
+import { useQuery } from "@tanstack/react-query";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { api, Category, Priority, PRIORITIES } from "./api";
+import { hasRelativeLink, rehypeHeadingIds, rehypeKeyLinks, resolveLink } from "./markdown";
 import * as I from "./icons";
 
-export function Markdown({ text }: { text: string }) {
+const plainClick = (e: ReactMouseEvent) => !(e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0);
+
+/**
+ * Rendered Markdown. Headings get GitHub-style ids; ticket/proposal keys of known projects become links;
+ * relative links resolve to docs of `projectKey` (default: the project in the URL), against the folder of
+ * `docPath` or the docs root. `headingLinks` adds a hover `#` that copies a section link; `newTab` opens
+ * in-app links in a new tab (e.g. from an editor preview, so a draft isn't lost).
+ */
+export function Markdown({ text, projectKey, docPath, headingLinks, newTab }: { text: string; projectKey?: string; docPath?: string; headingLinks?: boolean; newTab?: boolean }) {
+  const route = useParams().key;
+  const key = projectKey ?? route;
+  const navigate = useNavigate();
+  const location = useLocation();
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
+  const docs = useQuery({ queryKey: ["docs", key], queryFn: () => api.docs(key!), enabled: !!key && hasRelativeLink(text) });
+  const keys = useMemo(() => (projects.data ?? []).map((p) => p.key), [projects.data]);
+  const rehypePlugins = useMemo(() => [rehypeHeadingIds, rehypeKeyLinks(keys)], [keys]);
+  const docMap = useMemo(() => docs.data && new Map(docs.data.map((d) => [d.path.toLowerCase(), d.path])), [docs.data]);
+
+  const go = (e: ReactMouseEvent, to: string) => {
+    if (newTab || !plainClick(e)) return;
+    e.preventDefault();
+    // A ticket of the project already on screen opens in its side panel rather than leaving the page.
+    const ticket = to.match(/^\/t\/(.+)$/)?.[1];
+    if (ticket && route && ticket.startsWith(`${route}-`)) {
+      const params = new URLSearchParams(location.search);
+      params.set("ticket", ticket);
+      navigate({ search: params.toString(), hash: location.hash });
+    } else navigate(to);
+  };
+  const heading = (tag: string): Components["h1"] => ({ node: _node, children, id, ...props }) =>
+    createElement(
+      tag,
+      { id, ...props },
+      children,
+      headingLinks && id && (
+        <a
+          className="heading-anchor"
+          href={`#${id}`}
+          aria-label="Copy link to section"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate({ search: location.search, hash: id }, { replace: true });
+            navigator.clipboard?.writeText(`${window.location.origin}${location.pathname}${location.search}#${id}`).then(() => toast("Link copied"), () => {});
+          }}
+        >
+          #
+        </a>
+      ),
+    );
+  const components: Components = {
+    a: ({ node: _node, href = "", children, ...props }) => {
+      const t = resolveLink(href, { projectKey: key, docPath, docs: docMap });
+      if (t.kind === "external") return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
+      if (t.kind === "anchor") return <a {...props} href={href}>{children}</a>;
+      if (t.kind === "missing") return <span className="md-missing" title={`Doc not found: ${t.path}`}>{children}</span>;
+      return <a {...props} href={t.to} target={newTab ? "_blank" : undefined} onClick={(e) => go(e, t.to)}>{children}</a>;
+    },
+    h1: heading("h1"),
+    h2: heading("h2"),
+    h3: heading("h3"),
+    h4: heading("h4"),
+  };
   return (
     <div className="md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{ a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}
-      >
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={components}>
         {text}
       </ReactMarkdown>
     </div>

@@ -168,6 +168,8 @@ label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; 
   display: inline-grid; place-items: center; min-width: 26px; height: 18px; padding: 0 5px;
   border-radius: 5px; font-size: 9.5px; font-weight: 700; color: #fff; background: var(--accent); letter-spacing: 0.03em; flex: none;
 }
+/* A fixed-width key column in the sidebar so project names line up whatever the key length. */
+.sidebar .project-key { width: 38px; min-width: 0; padding: 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; line-height: 18px; text-align: center; }
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
 .page { flex: 1; overflow: auto; padding: 28px 36px; }
 .page.narrow > * { max-width: 860px; }
@@ -318,6 +320,12 @@ table.list tr.clickable:hover td { background: var(--hover); cursor: pointer; }
 .md th { background: var(--bg); font-weight: 600; color: var(--text-2); }
 .md img { max-width: 100%; border-radius: 8px; }
 .md hr { margin: 22px 0; }
+.md :is(h1, h2, h3, h4) { scroll-margin-top: 16px; }
+.md .heading-anchor { margin-left: 8px; color: var(--text-3); font-weight: 400; opacity: 0; transition: opacity 0.12s; }
+.md :is(h1, h2, h3, h4):hover .heading-anchor, .md .heading-anchor:focus-visible { opacity: 1; }
+.md .heading-anchor:hover { color: var(--accent); }
+.md .md-missing { color: var(--text-2); border-bottom: 1px dotted var(--border-strong); cursor: help; }
+.md a.key-link { font-family: var(--mono); font-size: 0.92em; }
 .md li.task-list-item { list-style: none; margin-left: -20px; display: flex; align-items: baseline; gap: 8px; }
 .md li.task-list-item input { transform: translateY(1px); }
 .empty-md { color: var(--text-3); cursor: text; padding: 6px 0; }
@@ -348,9 +356,24 @@ a.tile:hover { box-shadow: 0 4px 14px rgba(16, 17, 24, 0.07), 0 0 0 1px var(--bo
 
 .docs-layout { flex: 1; display: flex; overflow: hidden; }
 .docs-tree { width: 240px; flex: none; border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 8px; background: var(--bg); }
-.docs-tree .folder { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--text-3); padding: 12px 8px 4px; }
+.docs-tree .folder { color: var(--text-2); font-weight: 500; }
+.docs-tree .chev { flex: none; transition: transform 0.12s; }
+.docs-tree .chev.closed { transform: rotate(-90deg); }
 .docs-content { flex: 1; overflow-y: auto; padding: 32px 48px 80px; }
 .docs-content article, .docs-content .md { max-width: 760px; }
+.doc-read { display: flex; gap: 40px; align-items: flex-start; }
+.doc-read article { flex: 1; min-width: 0; }
+.doc-read .md { font-size: 14.5px; line-height: 1.7; }
+.doc-read .md h2 { font-size: 18px; margin-top: 36px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.doc-read .md h3 { font-size: 15px; margin-top: 26px; }
+.doc-read .md li + li { margin-top: 4px; }
+.doc-outline { position: sticky; top: 0; width: 220px; flex: none; max-height: calc(100vh - 140px); overflow-y: auto; display: flex; flex-direction: column; gap: 1px; padding: 2px 0 2px 12px; border-left: 1px solid var(--border); font-size: 12.5px; }
+.doc-outline-title { font-size: 11.5px; font-weight: 600; color: var(--text-3); padding: 0 0 6px; }
+.doc-outline a { color: var(--text-2); padding: 3px 0; line-height: 1.35; }
+.doc-outline a.sub { padding-left: 12px; color: var(--text-3); }
+.doc-outline a:hover { color: var(--text); }
+.doc-outline a.active { color: var(--accent); }
+@media (max-width: 1180px) { .doc-outline { display: none; } }
 
 .proposal-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; align-items: start; }
 .badge { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px; border-radius: 10px; font-size: 11.5px; font-weight: 600; text-transform: capitalize; }

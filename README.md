@@ -89,6 +89,15 @@ echo .bankan >> ~/.config/git/ignore
 
 `.bankan` may also set `url = "http://127.0.0.1:<port>"` to point the MCP server at a daemon on another port. Only localhost addresses are accepted, so a repo you clone can't redirect your agent's tool calls elsewhere.
 
+**One project, several repos.** When a project spans repos (an app monorepo, an infra repo, a marketing site), link each with a component:
+
+```bash
+bankan link HH --component apps     # in hellohouse-apps
+bankan link HH --component cloud    # in hellohouse-cloud
+```
+
+Tickets an agent creates from a repo get that repo's `component`, `context` lists that component's in-progress tickets first, and the board and list can filter and group by component.
+
 ## Using it with AI agents
 
 Connect once (`bankan setup` does this for you):
@@ -147,14 +156,23 @@ The full tool reference is in [docs/MCP.md](docs/MCP.md).
 
 The project **Settings** tab is where you edit statuses (name, category, colour, order), types, labels, milestones and custom fields. When you rename something, the change carries over to existing tickets.
 
+## Importing docs
+
+`bankan import docs/` copies every `.md` file under a folder into the project's docs, keeping the folder layout (paths are lowercased and slugified: `Research Notes/AI native.md` → `research-notes/ai-native`). The title comes from front matter, else the first `# ` heading, else the file name.
+
+Run it again whenever the source changes. Each doc remembers its source file and what was imported, so a re-run updates docs whose source changed, leaves the rest alone and never deletes anything. A doc that was edited in BanKan after the import is skipped rather than overwritten, as is a hand-made doc already at the same path; `--force` replaces both. Use `--dry-run` to see what would happen first.
+
+Relative links between imported files (`[05](05-architecture.md#15-decision-log)`) keep working: the UI resolves them to the matching doc and section.
+
 ## CLI
 
 ```
 bankan                 status at a glance (or a welcome message before setup)
 bankan setup           guided setup
 bankan open [KEY]      open the web UI (at the linked project's board inside a repo)
-bankan link KEY        link this repo to a project   [--create "Name"]
+bankan link KEY        link this repo to a project   [--create "Name"] [--component apps]
 bankan unlink          remove this repo's link
+bankan import DIR      import a folder of Markdown as docs   [--project KEY] [--prefix path] [--dry-run] [--force]
 bankan status          server, backup and link status
 bankan backup          run a git backup now
 bankan install         start at login (launchd / systemd)

@@ -63,7 +63,7 @@ function ProposalList({ proposals, projectKey }: { proposals: Proposal[]; projec
             {items.map((p) => (
               <Link key={p.id} to={`/p/${projectKey}/proposals/${p.id}`} className="tile" style={{ gap: 6, padding: "10px 12px" }}>
                 <div className="row small">
-                  <span className="mono faint">{p.id}</span>
+                  <span className="mono faint">{[p.id, ...(p.aliases ?? [])].join(" · ")}</span>
                   <span className={`badge ${p.status}`}>{p.status}</span>
                 </div>
                 <b style={{ fontWeight: 500 }}>{p.title}</b>
@@ -85,7 +85,9 @@ function ProposalDetail({ id }: { id: string }) {
   const { project, tickets, openTicket } = useProject();
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const q = useQuery({ queryKey: ["proposal", id], queryFn: () => api.proposal(id) });
+  // The route may name the proposal by an alias (/proposals/D17); writes go to its real key.
+  const q = useQuery({ queryKey: ["proposal", id], queryFn: () => api.findProposal(project.key, id) });
+  const pid = q.data?.id ?? id;
   const all = useQuery({ queryKey: ["proposals", project.key], queryFn: () => api.proposals(project.key) });
   const [newTicket, setNewTicket] = useState("");
   const refresh = () => {
@@ -94,11 +96,11 @@ function ProposalDetail({ id }: { id: string }) {
     qc.invalidateQueries({ queryKey: ["tickets", project.key] });
   };
   const update = useMutation({
-    mutationFn: (patch: Record<string, unknown>) => api.updateProposal(id, patch),
+    mutationFn: (patch: Record<string, unknown>) => api.updateProposal(pid, patch),
     onSuccess: refresh,
   });
   const createTicket = useMutation({
-    mutationFn: () => api.createTicket(project.key, { title: newTicket, proposal: id }),
+    mutationFn: () => api.createTicket(project.key, { title: newTicket, proposal: pid }),
     onSuccess: (t) => {
       setNewTicket("");
       toast(`Created ${t.id}`);
@@ -106,7 +108,7 @@ function ProposalDetail({ id }: { id: string }) {
     },
   });
   const del = useMutation({
-    mutationFn: () => api.deleteProposal(id),
+    mutationFn: () => api.deleteProposal(pid),
     onSuccess: () => {
       refresh();
       navigate(`/p/${project.key}/proposals`);
@@ -127,6 +129,9 @@ function ProposalDetail({ id }: { id: string }) {
             <I.ArrowLeft size={13} /> Proposals
           </Link>
           <span className="mono faint">{p.id}</span>
+          {p.aliases?.map((a) => (
+            <span key={a} className="mono faint">· {a}</span>
+          ))}
         </div>
         <InlineInput className="title-input" value={p.title} onCommit={(v) => v.trim() && set({ title: v })} />
         <div style={{ marginTop: 14 }}>
@@ -159,6 +164,10 @@ function ProposalDetail({ id }: { id: string }) {
             </div>
           )}
           {p.decided && <div className="faint small" style={{ padding: "0 8px 4px" }}>Decided {fmtDate(p.decided)}</div>}
+          <div className="prop">
+            <span>Aliases</span>
+            <TagInput values={p.aliases ?? []} onChange={(aliases) => set({ aliases })} placeholder="e.g. D17" />
+          </div>
           <div className="prop">
             <span>Authors</span>
             <TagInput values={p.authors ?? []} onChange={(authors) => set({ authors })} placeholder="Add author…" />

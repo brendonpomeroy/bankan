@@ -80,6 +80,7 @@ related: [RES-9]
 duplicate_of: RES-2
 proposal: RES-P3             # the proposal this implements
 branch: res-12-pagination
+component: apps              # part of a multi-repo project (from the repo's .bankan)
 links:
 - url: https://github.com/me/repo/pull/4
   title: 'PR #4'
@@ -110,6 +111,7 @@ Only `id`, `title`, `status`, `type`, `created` and `updated` are required. Empt
 id: RES-P3
 title: Move auth to OAuth device flow
 status: review               # draft | review | accepted | rejected | withdrawn | superseded | implemented
+aliases: [D17]               # other names, unique in the project; get_proposal accepts them as ids
 authors: [me, claude]
 labels: [auth]
 tickets: [RES-20, RES-21]    # tickets implementing it (kept in sync with ticket.proposal)
@@ -132,6 +134,8 @@ When a proposal that `supersedes` another is accepted, the older proposal is mar
 ---
 title: Getting started
 tags: [onboarding]
+source: /Users/me/code/app/docs/setup.md   # set by `bankan import`
+source_hash: 3f9c0a6b2d1e4f58               # hash of the body as imported, to spot later edits
 created: 2026-10-22T14:11:13Z
 updated: 2026-10-22T14:11:13Z
 ---

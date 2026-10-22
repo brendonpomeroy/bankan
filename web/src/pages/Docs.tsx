@@ -1,13 +1,109 @@
-import { useEffect, useState } from "react";
-import { NavLink, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { NavLink, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Doc, enc } from "../api";
-import { Chip, ConflictNotice, Markdown, Modal, pressable, TagInput, timeAgo, toast } from "../ui";
+import { Chip, ConflictNotice, Markdown, Modal, pressable, TagInput, timeAgo, toast, useLocalState } from "../ui";
 import { useProject } from "./ProjectLayout";
 import * as I from "../icons";
 
 function slugify(s: string) {
   return s.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "") || "untitled";
+}
+
+interface Folder { path: string; name: string; docs: Doc[]; folders: Folder[] }
+
+// Numeric-aware path order keeps a numbered series (00-…, 01-…, 10-…) in reading order; a folder's readme/index leads.
+const byPath = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+const isIndex = (d: Doc) => /(^|\/)(readme|index)$/i.test(d.path);
+
+function buildTree(list: Doc[]): Folder {
+  const root: Folder = { path: "", name: "", docs: [], folders: [] };
+  for (const d of list) {
+    let f = root;
+    for (const name of d.path.split("/").slice(0, -1)) {
+      const path = f.path ? `${f.path}/${name}` : name;
+      let next = f.folders.find((x) => x.path === path);
+      if (!next) f.folders.push((next = { path, name, docs: [], folders: [] }));
+      f = next;
+    }
+    f.docs.push(d);
+  }
+  const sort = (f: Folder) => {
+    f.docs.sort((a, b) => Number(isIndex(b)) - Number(isIndex(a)) || byPath(a.path, b.path));
+    f.folders.sort((a, b) => byPath(a.name, b.name)).forEach(sort);
+  };
+  sort(root);
+  return root;
+}
+
+/** One folder's docs then its subfolders, which collapse. */
+function TreeLevel({ folder, depth, projectKey, open, toggle }: { folder: Folder; depth: number; projectKey: string; open: string[]; toggle: (path: string) => void }) {
+  const pad = { paddingLeft: 8 + depth * 14 };
+  return (
+    <>
+      {folder.docs.map((d) => (
+        <NavLink key={d.path} to={`/p/${projectKey}/docs/${enc(d.path)}`} className={({ isActive }) => `nav-item${isActive ? " active" : ""}`} style={pad} title={d.path}>
+          <I.Doc size={14} />
+          <span className="ellipsis">{d.title}</span>
+        </NavLink>
+      ))}
+      {folder.folders.map((f) => {
+        const isOpen = open.includes(f.path);
+        return (
+          <div key={f.path}>
+            <button className="nav-item folder" style={pad} aria-expanded={isOpen} onClick={() => toggle(f.path)}>
+              <I.ChevronDown size={13} className={`chev${isOpen ? "" : " closed"}`} />
+              <span className="ellipsis">{f.name}</span>
+            </button>
+            {isOpen && <TreeLevel folder={f} depth={depth + 1} projectKey={projectKey} open={open} toggle={toggle} />}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+interface Heading { id: string; text: string; level: number }
+
+/** Sticky "On this page" list of the article's h2/h3s, highlighting the one scrolled to. */
+function Outline({ headings, scroller }: { headings: Heading[]; scroller: HTMLElement | null }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [active, setActive] = useState("");
+  useEffect(() => {
+    if (!scroller) return;
+    const onScroll = () => {
+      const top = scroller.getBoundingClientRect().top + 90;
+      let current = headings[0]?.id ?? "";
+      for (const h of headings) {
+        const el = document.getElementById(h.id);
+        if (el && el.getBoundingClientRect().top <= top) current = h.id;
+      }
+      setActive(current);
+    };
+    onScroll();
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => scroller.removeEventListener("scroll", onScroll);
+  }, [headings, scroller]);
+  return (
+    <aside className="doc-outline">
+      <div className="doc-outline-title">On this page</div>
+      {headings.map((h) => (
+        <a
+          key={h.id}
+          href={`#${h.id}`}
+          className={`${h.level === 3 ? "sub" : ""}${h.id === active ? " active" : ""}`}
+          onClick={(e) => {
+            e.preventDefault();
+            document.getElementById(h.id)?.scrollIntoView();
+            navigate({ search: location.search, hash: h.id }, { replace: true });
+          }}
+        >
+          {h.text}
+        </a>
+      ))}
+    </aside>
+  );
 }
 
 function NewDocModal({ projectKey, folders, onClose }: { projectKey: string; folders: string[]; onClose: () => void }) {
@@ -126,7 +222,7 @@ function DocEditor({ projectKey, doc, onDone }: { projectKey: string; doc: Doc; 
       <div className="editor-split">
         <textarea className="code" value={body} onChange={(e) => setBody(e.target.value)} autoFocus />
         <div className="preview">
-          <Markdown text={body} />
+          <Markdown text={body} projectKey={projectKey} docPath={path} newTab />
         </div>
       </div>
     </div>
@@ -156,6 +252,35 @@ export default function Docs() {
 
   const list = docs.data ?? [];
   const folders = [...new Set(list.map((d) => d.path.split("/").slice(0, -1).join("/")))].sort();
+  const tree = useMemo(() => buildTree(docs.data ?? []), [docs.data]);
+
+  // Open folders persist per project; the current doc's folders open automatically.
+  const [open, setOpen] = useLocalState<string[]>(`bankan.docs.open.${project.key}`, []);
+  const toggle = (f: string) => setOpen(open.includes(f) ? open.filter((x) => x !== f) : [...open, f]);
+  useEffect(() => {
+    const parts = path.split("/").slice(0, -1);
+    const ancestors = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+    if (ancestors.some((a) => !open.includes(a))) setOpen([...new Set([...open, ...ancestors])]);
+  }, [path]);
+
+  // Headings for the outline, read from the rendered article so ids match exactly.
+  const location = useLocation();
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const articleRef = useRef<HTMLElement>(null);
+  const [headings, setHeadings] = useState<Heading[]>([]);
+  const body = !editing ? doc.data?.body : undefined;
+  useEffect(() => {
+    const els = articleRef.current?.querySelectorAll<HTMLElement>(".md h2[id], .md h3[id]") ?? [];
+    const text = (el: HTMLElement) => [...el.childNodes].filter((n) => !(n instanceof HTMLElement && n.classList.contains("heading-anchor"))).map((n) => n.textContent).join("").trim();
+    setHeadings([...els].map((el) => ({ id: el.id, level: el.tagName === "H3" ? 3 : 2, text: text(el) })));
+  }, [body]);
+  // A new doc starts at the top; the URL's #section is scrolled to once it renders and whenever the hash changes.
+  const loaded = body !== undefined;
+  useEffect(() => scroller?.scrollTo(0, 0), [path, scroller]);
+  useEffect(() => {
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (id && loaded) document.getElementById(id)?.scrollIntoView();
+  }, [location.hash, path, loaded]);
 
   return (
     <div className="docs-layout">
@@ -164,22 +289,9 @@ export default function Docs() {
           <I.Plus size={13} /> New doc
         </button>
         {list.length === 0 && <div className="faint small" style={{ padding: 8 }}>No docs yet.</div>}
-        {folders.map((folder) => (
-          <div key={folder || "root"}>
-            {folder && <div className="folder">{folder.split("/").join(" / ")}</div>}
-            {list
-              .filter((d) => d.path.split("/").slice(0, -1).join("/") === folder)
-              .sort((a, b) => a.title.localeCompare(b.title))
-              .map((d) => (
-                <NavLink key={d.path} to={`/p/${project.key}/docs/${enc(d.path)}`} className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
-                  <I.Doc size={14} />
-                  <span className="ellipsis">{d.title}</span>
-                </NavLink>
-              ))}
-          </div>
-        ))}
+        <TreeLevel folder={tree} depth={0} projectKey={project.key} open={open} toggle={toggle} />
       </nav>
-      <div className="docs-content">
+      <div className="docs-content" ref={setScroller}>
         {!path && (
           <div className="empty-state">
             <div className="icon-wrap">
@@ -202,28 +314,31 @@ export default function Docs() {
         )}
         {path && doc.error && <div className="error">{doc.error.message}</div>}
         {path && doc.data && !editing && (
-          <article>
-            <div className="row" style={{ marginBottom: 6, maxWidth: 800 }}>
-              <span className="faint small mono">{doc.data.path}</span>
-              <span className="spacer" />
-              <span className="faint small">Updated {timeAgo(doc.data.updated)}</span>
-              <button className="small" onClick={() => setEditing(true)}>
-                <I.Pencil size={13} /> Edit
-              </button>
-              <button className="ghost small icon" title="Delete doc" onClick={() => confirm(`Delete "${doc.data!.title}"?`) && del.mutate()}>
-                <I.Trash size={14} />
-              </button>
-            </div>
-            {!!doc.data.tags?.length && (
-              <div className="row" style={{ gap: 4, marginBottom: 12 }}>
-                {doc.data.tags.map((t) => (
-                  <Chip key={t} label={t} />
-                ))}
+          <div className="doc-read">
+            <article ref={articleRef}>
+              <div className="row" style={{ marginBottom: 6 }}>
+                <span className="faint small mono">{doc.data.path}</span>
+                <span className="spacer" />
+                <span className="faint small">Updated {timeAgo(doc.data.updated)}</span>
+                <button className="small" onClick={() => setEditing(true)}>
+                  <I.Pencil size={13} /> Edit
+                </button>
+                <button className="ghost small icon" title="Delete doc" onClick={() => confirm(`Delete "${doc.data!.title}"?`) && del.mutate()}>
+                  <I.Trash size={14} />
+                </button>
               </div>
-            )}
-            {doc.data.body.trim().startsWith("# ") ? null : <h1 style={{ marginBottom: 16 }}>{doc.data.title}</h1>}
-            {doc.data.body.trim() ? <Markdown text={doc.data.body} /> : <div className="empty-md" {...pressable(() => setEditing(true))}>Empty doc. Click to write.</div>}
-          </article>
+              {!!doc.data.tags?.length && (
+                <div className="row" style={{ gap: 4, marginBottom: 12 }}>
+                  {doc.data.tags.map((t) => (
+                    <Chip key={t} label={t} />
+                  ))}
+                </div>
+              )}
+              {/^(\s*>.*\n|\s*\n)*# /.test(doc.data.body) ? null : <h1 style={{ marginBottom: 16 }}>{doc.data.title}</h1>}
+              {doc.data.body.trim() ? <Markdown text={doc.data.body} projectKey={project.key} docPath={doc.data.path} headingLinks /> : <div className="empty-md" {...pressable(() => setEditing(true))}>Empty doc. Click to write.</div>}
+            </article>
+            {headings.length >= 3 && <Outline headings={headings} scroller={scroller} />}
+          </div>
         )}
         {path && doc.data && editing && (
           <DocEditor

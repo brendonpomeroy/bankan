@@ -170,6 +170,9 @@ pub struct Ticket {
     pub proposal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The part of a multi-repo project this belongs to, e.g. `apps` (see `.bankan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -204,6 +207,9 @@ pub struct Proposal {
     pub id: String,
     pub title: String,
     pub status: ProposalStatus,
+    /// Other names the proposal goes by, e.g. `D17` for decision 17 in a decision log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -232,6 +238,12 @@ pub struct Doc {
     pub title: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// The file `bankan import` copied this doc from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// `content_hash` of the body as last imported, to tell source changes from edits made in BanKan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     #[serde(default)]

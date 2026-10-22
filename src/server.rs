@@ -283,6 +283,11 @@ async fn get_proposal(State(s): S, Path(id): Path<String>) -> ApiResult {
     to_json(s.store.read().await.get_proposal(&id)?)
 }
 
+/// By key or alias (`D17`) within a project.
+async fn find_proposal(State(s): S, Path((key, id)): Path<(String, String)>) -> ApiResult {
+    to_json(s.store.read().await.find_proposal(&key, &id)?)
+}
+
 async fn update_proposal(State(s): S, Path(id): Path<String>, JsonBody(input): JsonBody<ProposalInput>) -> ApiResult {
     let p = s.store.write().await.update_proposal(&id, input)?;
     s.emit("proposal", "updated", &project_of(&p.id), Some(&p.id));
@@ -318,7 +323,7 @@ async fn create_doc(State(s): S, Path(key): Path<String>, JsonBody(input): JsonB
     if store.get_doc(&key, &path).is_ok() {
         return Err(store::Error::Conflict(format!("doc '{path}' already exists")).into());
     }
-    let d = store.put_doc(&key, &path, DocInput { title: Some(input.title), body: Some(input.body), tags: Some(input.tags), new_path: None })?;
+    let d = store.put_doc(&key, &path, DocInput { title: Some(input.title), body: Some(input.body), tags: Some(input.tags), new_path: None, ..Default::default() })?;
     drop(store);
     s.emit("doc", "created", &key.to_ascii_uppercase(), Some(&d.path));
     to_json(d)
@@ -400,6 +405,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/projects/{key}", get(get_project).patch(update_project).delete(delete_project))
         .route("/projects/{key}/tickets", get(list_tickets).post(create_ticket))
         .route("/projects/{key}/proposals", get(list_proposals).post(create_proposal))
+        .route("/projects/{key}/proposals/{id}", get(find_proposal))
         .route("/projects/{key}/docs", get(list_docs).post(create_doc))
         .route("/projects/{key}/docs/{*path}", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket).delete(delete_ticket))

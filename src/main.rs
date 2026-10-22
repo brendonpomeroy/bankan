@@ -39,9 +39,29 @@ enum Cmd {
         /// Create the project if it doesn't exist, with this display name.
         #[arg(long, value_name = "NAME")]
         create: Option<String>,
+        /// For a project spread over several repos: this repo's part, e.g. `apps`.
+        #[arg(long)]
+        component: Option<String>,
     },
     /// Remove the current repo's `.bankan` link.
     Unlink,
+    /// Import a folder of Markdown files as docs. Re-run it to pick up changes; it never deletes.
+    Import {
+        /// Folder to import, e.g. docs/.
+        dir: std::path::PathBuf,
+        /// Project key (defaults to the repo's linked project).
+        #[arg(long)]
+        project: Option<String>,
+        /// Doc folder to import into, e.g. planning.
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace docs that were edited in BanKan, or that weren't imported, at the same paths.
+        #[arg(long)]
+        force: bool,
+    },
     /// Open the web UI (at the linked project's board when run inside a linked repo).
     Open {
         /// Project key to open.
@@ -92,7 +112,8 @@ fn run() -> Result<()> {
             println!("\n  Connect Claude Code (once, for all repos):\n    {}", style("claude mcp add bankan --scope user -- bankan mcp").cyan());
         }
         Some(Cmd::Uninstall) => service::uninstall()?,
-        Some(Cmd::Link { project, create }) => cli::link_repo(&cfg, &project, create)?,
+        Some(Cmd::Link { project, create, component }) => cli::link_repo(&cfg, &project, create, component)?,
+        Some(Cmd::Import { dir, project, prefix, dry_run, force }) => cli::import_docs(&cfg, &dir, project, prefix, dry_run, force)?,
         Some(Cmd::Unlink) => match link::find(&std::env::current_dir()?)? {
             Some(l) => {
                 std::fs::remove_file(&l.file)?;

@@ -18,7 +18,7 @@ const COLS: [SortKey, string][] = [
 export default function ListView() {
   const { project, visible, openTicket } = useProject();
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "status", dir: 1 });
-  const [group, setGroup] = useLocalState<"none" | "status" | "type" | "assignee" | "milestone">(`bankan.group.${project.key}`, "status");
+  const [group, setGroup] = useLocalState<"none" | "status" | "type" | "assignee" | "milestone" | "component">(`bankan.group.${project.key}`, "status");
 
   const statusIndex = (s: string) => project.statuses.findIndex((x) => x.name === s);
   const value = (t: Ticket, k: SortKey): string | number => {
@@ -67,6 +67,7 @@ export default function ListView() {
           <option value="type">Type</option>
           <option value="assignee">Assignee</option>
           <option value="milestone">Milestone</option>
+          <option value="component">Component</option>
         </select>
       </div>
       <table className="list">

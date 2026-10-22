@@ -82,7 +82,7 @@ function Sidebar({ live, onSearch, onNewProject }: { live: boolean; onSearch: ()
       </div>
       {projects?.map((p) => (
         <NavLink key={p.key} to={`/p/${p.key}`} className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
-          <span className="project-key" style={{ background: p.color ?? undefined }}>
+          <span className="project-key" style={{ background: p.color ?? undefined }} title={p.key}>
             {p.key}
           </span>
           <span className="ellipsis">{p.name}</span>

@@ -355,6 +355,9 @@ export default function TicketPanel({ id, project, onClose, onOpen }: { id: stri
                   )}
                 </div>
               </Prop>
+              <Prop label="Component">
+                <InlineInput className="mono" value={t.component ?? ""} placeholder="None" onCommit={(v) => set({ component: v.trim() || null })} />
+              </Prop>
               <Prop label="Branch">
                 <InlineInput className="mono" value={t.branch ?? ""} placeholder="None" onCommit={(v) => set({ branch: v.trim() || null })} />
               </Prop>

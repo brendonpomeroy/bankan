@@ -12,6 +12,9 @@ pub struct Link {
     pub project: String,
     /// Optional daemon URL override (defaults to the local config's port).
     pub url: Option<String>,
+    /// For a project spread over several repos: which part this repo is (e.g. `apps`).
+    /// New tickets made from here get it, and `context` puts its tickets first.
+    pub component: Option<String>,
     #[serde(skip)]
     pub file: PathBuf,
 }
@@ -25,6 +28,7 @@ pub fn find(start: &Path) -> Result<Option<Link>> {
             let text = std::fs::read_to_string(&file)?;
             let mut link: Link = toml::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
             link.project = link.project.trim().to_ascii_uppercase();
+            link.component = link.component.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
             link.file = file;
             return Ok(Some(link));
         }
@@ -49,9 +53,12 @@ pub fn is_local_url(url: &str) -> bool {
     matches!(host.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
 }
 
-pub fn write(dir: &Path, project: &str) -> Result<PathBuf> {
+pub fn write(dir: &Path, project: &str, component: Option<&str>) -> Result<PathBuf> {
     let file = dir.join(FILE_NAME);
-    let text = format!("# Links this repo to a BanKan project (tickets, docs and proposals live outside the repo).\nproject = \"{}\"\n", project.to_ascii_uppercase());
+    let mut text = format!("# Links this repo to a BanKan project (tickets, docs and proposals live outside the repo).\nproject = \"{}\"\n", project.to_ascii_uppercase());
+    if let Some(c) = component {
+        text.push_str(&format!("# This repo's part of the project: new tickets made from here are tagged with it.\ncomponent = {}\n", toml::Value::String(c.into())));
+    }
     std::fs::write(&file, text)?;
     Ok(file)
 }
