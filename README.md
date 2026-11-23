@@ -197,7 +197,7 @@ bankan mcp             MCP server over stdio (started by your AI client)
 
 The format is documented in [docs/DATA-FORMAT.md](docs/DATA-FORMAT.md).
 
-**Backups:** when they're on, BanKan commits `data/` every N minutes if anything changed, and again when it shuts down. With a remote set, it also pushes. It uses your normal git credentials (SSH agent or credential helper). You can change the settings in the UI under **Settings → Backup**, or in `config.toml`:
+**Backups:** when they're on, BanKan commits `data/` every N minutes if anything changed, and again when it shuts down. With a remote set, it also pushes, first merging anything another machine pushed to the same remote (restart the server to load a project that arrives this way). If both machines changed the same file, the backup reports it and leaves the merge to you. It uses your normal git credentials (SSH agent or credential helper). You can change the settings in the UI under **Settings → Backup**, or in `config.toml`:
 
 ```toml
 port = 7777
